@@ -1113,6 +1113,84 @@ func (s *scenario) thePdfsShouldHaveEmbeddedFile(ctx context.Context, kind, shou
 	return nil
 }
 
+func (s *scenario) theWebhookShouldHaveReceivedEventCallbacks(count int) error {
+	if s.server == nil {
+		return errors.New("server not initialized")
+	}
+	if len(s.server.eventReqs) != count {
+		return fmt.Errorf("expected %d event callback(s), got %d", count, len(s.server.eventReqs))
+	}
+	return nil
+}
+
+func (s *scenario) theWebhookEventHeaderShouldBe(eventIndex int, headerName, expected string) error {
+	if s.server == nil {
+		return errors.New("server not initialized")
+	}
+	if eventIndex < 1 || eventIndex > len(s.server.eventReqs) {
+		return fmt.Errorf("event index %d out of range (1-%d)", eventIndex, len(s.server.eventReqs))
+	}
+	actual := s.server.eventReqs[eventIndex-1].Header.Get(headerName)
+	if actual != expected {
+		return fmt.Errorf("expected header %q to be %q, got %q", headerName, expected, actual)
+	}
+	return nil
+}
+
+func (s *scenario) theWebhookEventBodyShouldMatchJSON(eventIndex int, expectedJSON *godog.DocString) error {
+	if s.server == nil {
+		return errors.New("server not initialized")
+	}
+	if eventIndex < 1 || eventIndex > len(s.server.eventBodies) {
+		return fmt.Errorf("event index %d out of range (1-%d)", eventIndex, len(s.server.eventBodies))
+	}
+
+	var expectedMap map[string]interface{}
+	err := json.Unmarshal([]byte(expectedJSON.Content), &expectedMap)
+	if err != nil {
+		return fmt.Errorf("unmarshal expected JSON: %w", err)
+	}
+
+	var actualMap map[string]interface{}
+	err = json.Unmarshal(s.server.eventBodies[eventIndex-1], &actualMap)
+	if err != nil {
+		return fmt.Errorf("unmarshal actual JSON: %w", err)
+	}
+
+	// Check that expected fields exist and match (allowing extra fields in actual)
+	for key, expectedValue := range expectedMap {
+		actualValue, exists := actualMap[key]
+		if !exists {
+			return fmt.Errorf("field %q not found in event body", key)
+		}
+
+		// For details, do partial matching
+		if key == "details" {
+			expectedDetails, ok1 := expectedValue.(map[string]interface{})
+			actualDetails, ok2 := actualValue.(map[string]interface{})
+			if ok1 && ok2 {
+				for detailKey, detailExpected := range expectedDetails {
+					detailActual, detailExists := actualDetails[detailKey]
+					if !detailExists {
+						return fmt.Errorf("detail field %q not found", detailKey)
+					}
+					if fmt.Sprintf("%v", detailActual) != fmt.Sprintf("%v", detailExpected) {
+						return fmt.Errorf("detail field %q: expected %v, got %v", detailKey, detailExpected, detailActual)
+					}
+				}
+				continue
+			}
+		}
+
+		// For other fields, exact match
+		if key != "timestamp" && fmt.Sprintf("%v", actualValue) != fmt.Sprintf("%v", expectedValue) {
+			return fmt.Errorf("field %q: expected %v, got %v", key, expectedValue, actualValue)
+		}
+	}
+
+	return nil
+}
+
 func InitializeScenario(ctx *godog.ScenarioContext) {
 	s := &scenario{}
 	ctx.Before(func(ctx context.Context, sc *godog.Scenario) (context.Context, error) {
@@ -1144,6 +1222,9 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Then(`^the (response|webhook request) body should match string:$`, s.theBodyShouldMatchString)
 	ctx.Then(`^the (response|webhook request) body should contain string:$`, s.theBodyShouldContainString)
 	ctx.Then(`^the (response|webhook request) body should match JSON:$`, s.theBodyShouldMatchJSON)
+	ctx.Then(`^the webhook should have received (\d+) event callback\(s\)$`, s.theWebhookShouldHaveReceivedEventCallbacks)
+	ctx.Then(`^the webhook event (\d+) header "([^"]*)" should be "([^"]*)"$`, s.theWebhookEventHeaderShouldBe)
+	ctx.Then(`^the webhook event (\d+) body should match JSON:$`, s.theWebhookEventBodyShouldMatchJSON)
 	ctx.Then(`^there should be (\d+) PDF\(s\) in the (response|webhook request)$`, s.thereShouldBePdfs)
 	ctx.Then(`^there should be the following file\(s\) in the (response|webhook request):$`, s.thereShouldBeTheFollowingFiles)
 	ctx.Then(`^the (response|webhook request) PDF\(s\) should be valid "([^"]*)" with a tolerance of (\d+) failed rule\(s\)$`, s.thePdfsShouldBeValidWithAToleranceOf)

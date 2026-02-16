@@ -19,10 +19,12 @@ import (
 )
 
 type server struct {
-	srv      *echo.Echo
-	req      *http.Request
-	bodyCopy []byte
-	errChan  chan error
+	srv         *echo.Echo
+	req         *http.Request
+	bodyCopy    []byte
+	errChan     chan error
+	eventReqs   []*http.Request
+	eventBodies [][]byte
 }
 
 func newServer(ctx context.Context, workdir string) (*server, error) {
@@ -136,12 +138,26 @@ func newServer(ctx context.Context, workdir string) (*server, error) {
 		return webhookErr(c.String(http.StatusOK, http.StatusText(http.StatusOK)))
 	}
 
+	// Event handlers for webhook event callbacks.
+	eventHandler := func(c echo.Context) error {
+		body, err := io.ReadAll(c.Request().Body)
+		if err != nil {
+			return fmt.Errorf("read event request body: %w", err)
+		}
+		s.eventReqs = append(s.eventReqs, c.Request())
+		s.eventBodies = append(s.eventBodies, body)
+		return c.String(http.StatusOK, http.StatusText(http.StatusOK))
+	}
+
 	srv.POST("/webhook", webhookHandler)
 	srv.PATCH("/webhook", webhookHandler)
 	srv.PUT("/webhook", webhookHandler)
 	srv.POST("/webhook/error", webhookErrorHandler)
 	srv.PATCH("/webhook/error", webhookErrorHandler)
 	srv.PUT("/webhook/error", webhookErrorHandler)
+	srv.POST("/webhook/upload-success", eventHandler)
+	srv.POST("/webhook/upload-error", eventHandler)
+	srv.POST("/webhook/events", eventHandler)
 	srv.GET("/static/:path", func(c echo.Context) error {
 		s.req = c.Request()
 		path := c.Param("path")

@@ -21,13 +21,16 @@ import (
 )
 
 type sendOutputFileParams struct {
-	ctx              *api.Context
-	outputPath       string
-	extraHttpHeaders map[string]string
-	traceHeader      string
-	trace            string
-	client           *client
-	handleError      func(error)
+	ctx                     *api.Context
+	outputPath              string
+	extraHttpHeaders        map[string]string
+	traceHeader             string
+	trace                   string
+	client                  *client
+	handleError             func(error)
+	webhookUploadSuccessUrl string
+	webhookUploadErrorUrl   string
+	webhookEventsUrl        string
 }
 
 func webhookMiddleware(w *Webhook) api.Middleware {
@@ -81,10 +84,38 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 						headers[echo.HeaderContentDisposition] = fmt.Sprintf("attachment; filename=%q", params.ctx.OutputFilename(params.outputPath))
 					}
 
+					startTime := time.Now()
 					err = params.client.send(bufio.NewReader(outputFile), headers, false)
+					latencyMs := time.Since(startTime).Milliseconds()
+
 					if err != nil {
 						params.ctx.Log().Error(fmt.Sprintf("send output file to webhook: %s", err))
 						params.handleError(err)
+
+						// Dispatch upload.error event.
+						status, message := api.ParseError(err)
+						uploadErrorEvent := newUploadErrorEvent(params.trace, status, message)
+
+						if params.webhookUploadErrorUrl != "" {
+							params.client.sendEvent(uploadErrorEvent, params.webhookUploadErrorUrl)
+						}
+
+						if params.webhookEventsUrl != "" {
+							params.client.sendEvent(uploadErrorEvent, params.webhookEventsUrl)
+						}
+
+						return
+					}
+
+					// Dispatch upload.success event.
+					uploadSuccessEvent := newUploadSuccessEvent(params.trace, params.client.url, fileStat.Size(), latencyMs)
+
+					if params.webhookUploadSuccessUrl != "" {
+						params.client.sendEvent(uploadSuccessEvent, params.webhookUploadSuccessUrl)
+					}
+
+					if params.webhookEventsUrl != "" {
+						params.client.sendEvent(uploadSuccessEvent, params.webhookEventsUrl)
 					}
 				}
 
@@ -122,6 +153,35 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 					err = gotenberg.FilterDeadline(w.errorAllowList, w.errorDenyList, webhookErrorUrl, deadline)
 					if err != nil {
 						return fmt.Errorf("filter webhook error URL: %w", err)
+					}
+
+					// Parse optional webhook event URLs.
+					webhookUploadSuccessUrl := c.Request().Header.Get("Gotenberg-Webhook-Upload-Success-Url")
+					webhookUploadErrorUrl := c.Request().Header.Get("Gotenberg-Webhook-Upload-Error-Url")
+					webhookEventsUrl := c.Request().Header.Get("Gotenberg-Webhook-Events-Url")
+
+					// Validate optional upload success URL against allow/deny lists.
+					if webhookUploadSuccessUrl != "" {
+						err = gotenberg.FilterDeadline(w.allowList, w.denyList, webhookUploadSuccessUrl, deadline)
+						if err != nil {
+							return fmt.Errorf("filter webhook upload success URL: %w", err)
+						}
+					}
+
+					// Validate optional upload error URL against allow/deny lists.
+					if webhookUploadErrorUrl != "" {
+						err = gotenberg.FilterDeadline(w.errorAllowList, w.errorDenyList, webhookUploadErrorUrl, deadline)
+						if err != nil {
+							return fmt.Errorf("filter webhook upload error URL: %w", err)
+						}
+					}
+
+					// Validate optional events URL against allow/deny lists.
+					if webhookEventsUrl != "" {
+						err = gotenberg.FilterDeadline(w.allowList, w.denyList, webhookEventsUrl, deadline)
+						if err != nil {
+							return fmt.Errorf("filter webhook events URL: %w", err)
+						}
 					}
 
 					// Let's check the HTTP methods for calling the webhook URLs.
@@ -233,6 +293,13 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 						if err != nil {
 							ctx.Log().Error(fmt.Sprintf("send error response to webhook: %s", err.Error()))
 						}
+
+						// Dispatch conversion.error event.
+						conversionErrorEvent := newConversionErrorEvent(trace, status, message)
+
+						if webhookEventsUrl != "" {
+							client.sendEvent(conversionErrorEvent, webhookEventsUrl)
+						}
 					}
 
 					if w.enableSyncMode {
@@ -260,15 +327,25 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 							handleError(err)
 							return nil
 						}
+
+						// Dispatch conversion.success event.
+						conversionSuccessEvent := newConversionSuccessEvent(trace)
+						if webhookEventsUrl != "" {
+							client.sendEvent(conversionSuccessEvent, webhookEventsUrl)
+						}
+
 						// No error, let's send the output file to the webhook URL.
 						sendOutputFile(sendOutputFileParams{
-							ctx:              ctx,
-							outputPath:       outputPath,
-							extraHttpHeaders: extraHttpHeaders,
-							traceHeader:      traceHeader,
-							trace:            trace,
-							client:           client,
-							handleError:      handleError,
+							ctx:                     ctx,
+							outputPath:              outputPath,
+							extraHttpHeaders:        extraHttpHeaders,
+							traceHeader:             traceHeader,
+							trace:                   trace,
+							client:                  client,
+							handleError:             handleError,
+							webhookUploadSuccessUrl: webhookUploadSuccessUrl,
+							webhookUploadErrorUrl:   webhookUploadErrorUrl,
+							webhookEventsUrl:        webhookEventsUrl,
 						})
 						return c.NoContent(http.StatusNoContent)
 					}
@@ -331,14 +408,23 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 							return
 						}
 
+						// Dispatch conversion.success event.
+						conversionSuccessEvent := newConversionSuccessEvent(trace)
+						if webhookEventsUrl != "" {
+							client.sendEvent(conversionSuccessEvent, webhookEventsUrl)
+						}
+
 						sendOutputFile(sendOutputFileParams{
-							ctx:              ctx,
-							outputPath:       outputPath,
-							extraHttpHeaders: extraHttpHeaders,
-							traceHeader:      traceHeader,
-							trace:            trace,
-							client:           client,
-							handleError:      handleError,
+							ctx:                     ctx,
+							outputPath:              outputPath,
+							extraHttpHeaders:        extraHttpHeaders,
+							traceHeader:             traceHeader,
+							trace:                   trace,
+							client:                  client,
+							handleError:             handleError,
+							webhookUploadSuccessUrl: webhookUploadSuccessUrl,
+							webhookUploadErrorUrl:   webhookUploadErrorUrl,
+							webhookEventsUrl:        webhookEventsUrl,
 						})
 					}()
 
