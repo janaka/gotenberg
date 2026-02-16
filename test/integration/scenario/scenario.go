@@ -1113,6 +1113,115 @@ func (s *scenario) thePdfsShouldHaveEmbeddedFile(ctx context.Context, kind, shou
 	return nil
 }
 
+func (s *scenario) theWebhookShouldHaveReceivedEventCallbacks(count int) error {
+	if s.server == nil {
+		return errors.New("server not initialized")
+	}
+	s.server.eventMutex.Lock()
+	actualCount := len(s.server.eventReqs)
+	s.server.eventMutex.Unlock()
+	if actualCount != count {
+		return fmt.Errorf("expected %d event callback(s), got %d", count, actualCount)
+	}
+	return nil
+}
+
+func (s *scenario) theWebhookEventHeaderShouldBe(eventIndex int, headerName, expected string) error {
+	if s.server == nil {
+		return errors.New("server not initialized")
+	}
+	s.server.eventMutex.Lock()
+	if eventIndex < 1 || eventIndex > len(s.server.eventReqs) {
+		s.server.eventMutex.Unlock()
+		return fmt.Errorf("event index %d out of range (1-%d)", eventIndex, len(s.server.eventReqs))
+	}
+	actual := s.server.eventReqs[eventIndex-1].Header.Get(headerName)
+	s.server.eventMutex.Unlock()
+	if actual != expected {
+		return fmt.Errorf("expected header %q to be %q, got %q", headerName, expected, actual)
+	}
+	return nil
+}
+
+func (s *scenario) theWebhookEventBodyShouldMatchJSON(eventIndex int, expectedJSON *godog.DocString) error {
+	if s.server == nil {
+		return errors.New("server not initialized")
+	}
+
+	s.server.eventMutex.Lock()
+	if eventIndex < 1 || eventIndex > len(s.server.eventBodies) {
+		s.server.eventMutex.Unlock()
+		return fmt.Errorf("event index %d out of range (1-%d)", eventIndex, len(s.server.eventBodies))
+	}
+	eventBody := s.server.eventBodies[eventIndex-1]
+	s.server.eventMutex.Unlock()
+
+	var expectedMap map[string]interface{}
+	err := json.Unmarshal([]byte(expectedJSON.Content), &expectedMap)
+	if err != nil {
+		return fmt.Errorf("unmarshal expected JSON: %w", err)
+	}
+
+	var actualMap map[string]interface{}
+	err = json.Unmarshal(eventBody, &actualMap)
+	if err != nil {
+		return fmt.Errorf("unmarshal actual JSON: %w", err)
+	}
+
+	// Validate timestamp field exists and has correct format
+	timestampValue, hasTimestamp := actualMap["timestamp"]
+	if hasTimestamp {
+		timestampStr, ok := timestampValue.(string)
+		if !ok {
+			return fmt.Errorf("timestamp field is not a string")
+		}
+		_, err := time.Parse(time.RFC3339Nano, timestampStr)
+		if err != nil {
+			return fmt.Errorf("timestamp field is not in RFC3339Nano format: %w", err)
+		}
+	}
+
+	// Check that expected fields exist and match (allowing extra fields in actual)
+	for key, expectedValue := range expectedMap {
+		actualValue, exists := actualMap[key]
+		if !exists {
+			return fmt.Errorf("field %q not found in event body", key)
+		}
+
+		// For details, do partial matching
+		if key == "details" {
+			expectedDetails, ok1 := expectedValue.(map[string]interface{})
+			actualDetails, ok2 := actualValue.(map[string]interface{})
+			if ok1 && ok2 {
+				for detailKey, detailExpected := range expectedDetails {
+					detailActual, detailExists := actualDetails[detailKey]
+					if !detailExists {
+						return fmt.Errorf("detail field %q not found", detailKey)
+					}
+					// Use type-safe comparison
+					expectedStr := fmt.Sprintf("%v", detailExpected)
+					actualStr := fmt.Sprintf("%v", detailActual)
+					if actualStr != expectedStr {
+						return fmt.Errorf("detail field %q: expected %v, got %v", detailKey, detailExpected, detailActual)
+					}
+				}
+				continue
+			}
+		}
+
+		// For other fields, exact match (skip timestamp as it's validated separately)
+		if key != "timestamp" {
+			expectedStr := fmt.Sprintf("%v", expectedValue)
+			actualStr := fmt.Sprintf("%v", actualValue)
+			if actualStr != expectedStr {
+				return fmt.Errorf("field %q: expected %v, got %v", key, expectedValue, actualValue)
+			}
+		}
+	}
+
+	return nil
+}
+
 func InitializeScenario(ctx *godog.ScenarioContext) {
 	s := &scenario{}
 	ctx.Before(func(ctx context.Context, sc *godog.Scenario) (context.Context, error) {
@@ -1144,6 +1253,9 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Then(`^the (response|webhook request) body should match string:$`, s.theBodyShouldMatchString)
 	ctx.Then(`^the (response|webhook request) body should contain string:$`, s.theBodyShouldContainString)
 	ctx.Then(`^the (response|webhook request) body should match JSON:$`, s.theBodyShouldMatchJSON)
+	ctx.Then(`^the webhook should have received (\d+) event callback\(s\)$`, s.theWebhookShouldHaveReceivedEventCallbacks)
+	ctx.Then(`^the webhook event (\d+) header "([^"]*)" should be "([^"]*)"$`, s.theWebhookEventHeaderShouldBe)
+	ctx.Then(`^the webhook event (\d+) body should match JSON:$`, s.theWebhookEventBodyShouldMatchJSON)
 	ctx.Then(`^there should be (\d+) PDF\(s\) in the (response|webhook request)$`, s.thereShouldBePdfs)
 	ctx.Then(`^there should be the following file\(s\) in the (response|webhook request):$`, s.thereShouldBeTheFollowingFiles)
 	ctx.Then(`^the (response|webhook request) PDF\(s\) should be valid "([^"]*)" with a tolerance of (\d+) failed rule\(s\)$`, s.thePdfsShouldBeValidWithAToleranceOf)

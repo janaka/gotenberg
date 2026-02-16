@@ -28,6 +28,7 @@ type sendOutputFileParams struct {
 	trace            string
 	client           *client
 	handleError      func(error)
+	webhookEventsUrl string
 }
 
 func webhookMiddleware(w *Webhook) api.Middleware {
@@ -81,10 +82,30 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 						headers[echo.HeaderContentDisposition] = fmt.Sprintf("attachment; filename=%q", params.ctx.OutputFilename(params.outputPath))
 					}
 
+					// Measure network latency for the upload operation.
+					// This measures only the send() call latency, not file I/O operations.
+					startTime := time.Now()
 					err = params.client.send(bufio.NewReader(outputFile), headers, false)
+					latencyMs := time.Since(startTime).Milliseconds()
+
 					if err != nil {
 						params.ctx.Log().Error(fmt.Sprintf("send output file to webhook: %s", err))
 						params.handleError(err)
+
+						// Dispatch upload.error event.
+						if params.webhookEventsUrl != "" {
+							status, message := api.ParseError(err)
+							uploadErrorEvent := newUploadErrorEvent(params.trace, status, message)
+							params.client.sendEvent(uploadErrorEvent, params.webhookEventsUrl)
+						}
+
+						return
+					}
+
+					// Dispatch upload.success event.
+					if params.webhookEventsUrl != "" {
+						uploadSuccessEvent := newUploadSuccessEvent(params.trace, params.client.url, fileStat.Size(), latencyMs)
+						params.client.sendEvent(uploadSuccessEvent, params.webhookEventsUrl)
 					}
 				}
 
@@ -122,6 +143,18 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 					err = gotenberg.FilterDeadline(w.errorAllowList, w.errorDenyList, webhookErrorUrl, deadline)
 					if err != nil {
 						return fmt.Errorf("filter webhook error URL: %w", err)
+					}
+
+					// Parse optional webhook events URL.
+					webhookEventsUrl := c.Request().Header.Get("Gotenberg-Webhook-Events-Url")
+
+					// Validate optional events URL against allow/deny lists.
+					// Uses standard allow/deny lists since it receives all event types.
+					if webhookEventsUrl != "" {
+						err = gotenberg.FilterDeadline(w.allowList, w.denyList, webhookEventsUrl, deadline)
+						if err != nil {
+							return fmt.Errorf("filter webhook events URL: %w", err)
+						}
 					}
 
 					// Let's check the HTTP methods for calling the webhook URLs.
@@ -233,6 +266,13 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 						if err != nil {
 							ctx.Log().Error(fmt.Sprintf("send error response to webhook: %s", err.Error()))
 						}
+
+						// Dispatch conversion.error event.
+						conversionErrorEvent := newConversionErrorEvent(trace, status, message)
+
+						if webhookEventsUrl != "" {
+							client.sendEvent(conversionErrorEvent, webhookEventsUrl)
+						}
 					}
 
 					if w.enableSyncMode {
@@ -260,6 +300,13 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 							handleError(err)
 							return nil
 						}
+
+						// Dispatch conversion.success event.
+						conversionSuccessEvent := newConversionSuccessEvent(trace)
+						if webhookEventsUrl != "" {
+							client.sendEvent(conversionSuccessEvent, webhookEventsUrl)
+						}
+
 						// No error, let's send the output file to the webhook URL.
 						sendOutputFile(sendOutputFileParams{
 							ctx:              ctx,
@@ -269,6 +316,7 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 							trace:            trace,
 							client:           client,
 							handleError:      handleError,
+							webhookEventsUrl: webhookEventsUrl,
 						})
 						return c.NoContent(http.StatusNoContent)
 					}
@@ -331,6 +379,12 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 							return
 						}
 
+						// Dispatch conversion.success event.
+						conversionSuccessEvent := newConversionSuccessEvent(trace)
+						if webhookEventsUrl != "" {
+							client.sendEvent(conversionSuccessEvent, webhookEventsUrl)
+						}
+
 						sendOutputFile(sendOutputFileParams{
 							ctx:              ctx,
 							outputPath:       outputPath,
@@ -339,6 +393,7 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 							trace:            trace,
 							client:           client,
 							handleError:      handleError,
+							webhookEventsUrl: webhookEventsUrl,
 						})
 					}()
 

@@ -1,6 +1,8 @@
 package webhook
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -109,4 +111,44 @@ func (c client) send(body io.Reader, headers map[string]string, errored bool) er
 	c.logger.Info("request to webhook handled", fields...)
 
 	return nil
+}
+
+// sendEvent sends a JSON event payload to a specific URL using POST.
+// This method is fire-and-forget; errors are logged but not propagated.
+func (c client) sendEvent(event Event, url string) {
+	jsonData, err := json.Marshal(event)
+	if err != nil {
+		c.logger.Error(fmt.Sprintf("marshal event JSON: %s", err.Error()))
+		return
+	}
+
+	req, err := retryablehttp.NewRequest(http.MethodPost, url, bytes.NewReader(jsonData))
+	if err != nil {
+		c.logger.Error(fmt.Sprintf("create POST request to '%s': %s", url, err.Error()))
+		return
+	}
+
+	req.Header.Set("User-Agent", "Gotenberg")
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req.Header.Set("X-Gotenberg-Event", event.Event)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		c.logger.Error(fmt.Sprintf("send POST request to '%s': %s", url, err.Error()))
+		return
+	}
+
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			c.logger.Error(fmt.Sprintf("close response body from '%s': %s", url, err))
+		}
+	}()
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		c.logger.Error(fmt.Sprintf("send POST request to '%s': got status: '%s'", url, resp.Status))
+		return
+	}
+
+	c.logger.Debug(fmt.Sprintf("event '%s' sent to '%s'", event.Event, url))
 }
