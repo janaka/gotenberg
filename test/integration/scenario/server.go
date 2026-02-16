@@ -159,8 +159,6 @@ func newServer(ctx context.Context, workdir string) (*server, error) {
 	srv.POST("/webhook/error", webhookErrorHandler)
 	srv.PATCH("/webhook/error", webhookErrorHandler)
 	srv.PUT("/webhook/error", webhookErrorHandler)
-	srv.POST("/webhook/upload-success", eventHandler)
-	srv.POST("/webhook/upload-error", eventHandler)
 	srv.POST("/webhook/events", eventHandler)
 	srv.GET("/static/:path", func(c echo.Context) error {
 		s.req = c.Request()
