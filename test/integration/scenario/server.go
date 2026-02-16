@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/cucumber/godog"
 	"github.com/google/uuid"
@@ -25,6 +26,7 @@ type server struct {
 	errChan     chan error
 	eventReqs   []*http.Request
 	eventBodies [][]byte
+	eventMutex  sync.Mutex
 }
 
 func newServer(ctx context.Context, workdir string) (*server, error) {
@@ -144,8 +146,10 @@ func newServer(ctx context.Context, workdir string) (*server, error) {
 		if err != nil {
 			return fmt.Errorf("read event request body: %w", err)
 		}
+		s.eventMutex.Lock()
 		s.eventReqs = append(s.eventReqs, c.Request())
 		s.eventBodies = append(s.eventBodies, body)
+		s.eventMutex.Unlock()
 		return c.String(http.StatusOK, http.StatusText(http.StatusOK))
 	}
 

@@ -84,6 +84,8 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 						headers[echo.HeaderContentDisposition] = fmt.Sprintf("attachment; filename=%q", params.ctx.OutputFilename(params.outputPath))
 					}
 
+					// Measure network latency for the upload operation.
+					// This measures only the send() call latency, not file I/O operations.
 					startTime := time.Now()
 					err = params.client.send(bufio.NewReader(outputFile), headers, false)
 					latencyMs := time.Since(startTime).Milliseconds()
@@ -161,6 +163,7 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 					webhookEventsUrl := c.Request().Header.Get("Gotenberg-Webhook-Events-Url")
 
 					// Validate optional upload success URL against allow/deny lists.
+					// Uses standard allow/deny lists since success callbacks are informational.
 					if webhookUploadSuccessUrl != "" {
 						err = gotenberg.FilterDeadline(w.allowList, w.denyList, webhookUploadSuccessUrl, deadline)
 						if err != nil {
@@ -168,7 +171,8 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 						}
 					}
 
-					// Validate optional upload error URL against allow/deny lists.
+					// Validate optional upload error URL against error-specific allow/deny lists.
+					// Uses error allow/deny lists to match the security model of webhookErrorUrl.
 					if webhookUploadErrorUrl != "" {
 						err = gotenberg.FilterDeadline(w.errorAllowList, w.errorDenyList, webhookUploadErrorUrl, deadline)
 						if err != nil {
@@ -177,6 +181,7 @@ func webhookMiddleware(w *Webhook) api.Middleware {
 					}
 
 					// Validate optional events URL against allow/deny lists.
+					// Uses standard allow/deny lists since it receives all event types.
 					if webhookEventsUrl != "" {
 						err = gotenberg.FilterDeadline(w.allowList, w.denyList, webhookEventsUrl, deadline)
 						if err != nil {

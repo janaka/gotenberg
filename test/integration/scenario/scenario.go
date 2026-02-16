@@ -1117,8 +1117,11 @@ func (s *scenario) theWebhookShouldHaveReceivedEventCallbacks(count int) error {
 	if s.server == nil {
 		return errors.New("server not initialized")
 	}
-	if len(s.server.eventReqs) != count {
-		return fmt.Errorf("expected %d event callback(s), got %d", count, len(s.server.eventReqs))
+	s.server.eventMutex.Lock()
+	actualCount := len(s.server.eventReqs)
+	s.server.eventMutex.Unlock()
+	if actualCount != count {
+		return fmt.Errorf("expected %d event callback(s), got %d", count, actualCount)
 	}
 	return nil
 }
@@ -1127,10 +1130,13 @@ func (s *scenario) theWebhookEventHeaderShouldBe(eventIndex int, headerName, exp
 	if s.server == nil {
 		return errors.New("server not initialized")
 	}
+	s.server.eventMutex.Lock()
 	if eventIndex < 1 || eventIndex > len(s.server.eventReqs) {
+		s.server.eventMutex.Unlock()
 		return fmt.Errorf("event index %d out of range (1-%d)", eventIndex, len(s.server.eventReqs))
 	}
 	actual := s.server.eventReqs[eventIndex-1].Header.Get(headerName)
+	s.server.eventMutex.Unlock()
 	if actual != expected {
 		return fmt.Errorf("expected header %q to be %q, got %q", headerName, expected, actual)
 	}
@@ -1141,9 +1147,14 @@ func (s *scenario) theWebhookEventBodyShouldMatchJSON(eventIndex int, expectedJS
 	if s.server == nil {
 		return errors.New("server not initialized")
 	}
+
+	s.server.eventMutex.Lock()
 	if eventIndex < 1 || eventIndex > len(s.server.eventBodies) {
+		s.server.eventMutex.Unlock()
 		return fmt.Errorf("event index %d out of range (1-%d)", eventIndex, len(s.server.eventBodies))
 	}
+	eventBody := s.server.eventBodies[eventIndex-1]
+	s.server.eventMutex.Unlock()
 
 	var expectedMap map[string]interface{}
 	err := json.Unmarshal([]byte(expectedJSON.Content), &expectedMap)
@@ -1152,9 +1163,22 @@ func (s *scenario) theWebhookEventBodyShouldMatchJSON(eventIndex int, expectedJS
 	}
 
 	var actualMap map[string]interface{}
-	err = json.Unmarshal(s.server.eventBodies[eventIndex-1], &actualMap)
+	err = json.Unmarshal(eventBody, &actualMap)
 	if err != nil {
 		return fmt.Errorf("unmarshal actual JSON: %w", err)
+	}
+
+	// Validate timestamp field exists and has correct format
+	timestampValue, hasTimestamp := actualMap["timestamp"]
+	if hasTimestamp {
+		timestampStr, ok := timestampValue.(string)
+		if !ok {
+			return fmt.Errorf("timestamp field is not a string")
+		}
+		_, err := time.Parse(time.RFC3339Nano, timestampStr)
+		if err != nil {
+			return fmt.Errorf("timestamp field is not in RFC3339Nano format: %w", err)
+		}
 	}
 
 	// Check that expected fields exist and match (allowing extra fields in actual)
@@ -1174,7 +1198,10 @@ func (s *scenario) theWebhookEventBodyShouldMatchJSON(eventIndex int, expectedJS
 					if !detailExists {
 						return fmt.Errorf("detail field %q not found", detailKey)
 					}
-					if fmt.Sprintf("%v", detailActual) != fmt.Sprintf("%v", detailExpected) {
+					// Use type-safe comparison
+					expectedStr := fmt.Sprintf("%v", detailExpected)
+					actualStr := fmt.Sprintf("%v", detailActual)
+					if actualStr != expectedStr {
 						return fmt.Errorf("detail field %q: expected %v, got %v", detailKey, detailExpected, detailActual)
 					}
 				}
@@ -1182,9 +1209,13 @@ func (s *scenario) theWebhookEventBodyShouldMatchJSON(eventIndex int, expectedJS
 			}
 		}
 
-		// For other fields, exact match
-		if key != "timestamp" && fmt.Sprintf("%v", actualValue) != fmt.Sprintf("%v", expectedValue) {
-			return fmt.Errorf("field %q: expected %v, got %v", key, expectedValue, actualValue)
+		// For other fields, exact match (skip timestamp as it's validated separately)
+		if key != "timestamp" {
+			expectedStr := fmt.Sprintf("%v", expectedValue)
+			actualStr := fmt.Sprintf("%v", actualValue)
+			if actualStr != expectedStr {
+				return fmt.Errorf("field %q: expected %v, got %v", key, expectedValue, actualValue)
+			}
 		}
 	}
 
